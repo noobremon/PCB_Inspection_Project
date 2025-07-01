@@ -1,0 +1,26 @@
+[
+  {
+    "image_path": "test_images\\1.jpg",
+    "prediction": "Good",
+    "confidence": 0.9,
+    "timestamp": "2025-06-30T18:42:01.653882"
+  },
+  {
+    "image_path": "test_images\\dasdas.jpg",
+    "prediction": "Good",
+    "confidence": 0.92,
+    "timestamp": "2025-06-30T18:42:02.609214"
+  },
+  {
+    "image_path": "test_images\\dfdfs.jpg",
+    "prediction": "Good",
+    "confidence": 0.88,
+    "timestamp": "2025-06-30T18:42:03.576678"
+  },
+  {
+    "image_path": "test_images\\PCB1.jpg",
+    "prediction": "Good",
+    "confidence": 0.88,
+    "timestamp": "2025-06-30T18:42:04.535372"
+  }
+]

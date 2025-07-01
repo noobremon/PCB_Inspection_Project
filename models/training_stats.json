@@ -1,0 +1,10 @@
+{
+  "training_date": "2025-06-30T18:39:04.116262",
+  "total_samples": 38,
+  "good_samples": 4,
+  "defective_samples": 34,
+  "validation_accuracy": 1.0,
+  "feature_count": 64,
+  "classes_in_training": 2,
+  "classes_in_test": 2
+}
