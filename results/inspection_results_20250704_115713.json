@@ -1,0 +1,38 @@
+[
+  {
+    "image_path": "test_images\\1.jpg",
+    "prediction": "Good",
+    "confidence": 0.9,
+    "timestamp": "2025-07-04T11:57:09.278453"
+  },
+  {
+    "image_path": "test_images\\copper.jpg",
+    "prediction": "Defective",
+    "confidence": 1.0,
+    "timestamp": "2025-07-04T11:57:10.080389"
+  },
+  {
+    "image_path": "test_images\\dasdas.jpg",
+    "prediction": "Good",
+    "confidence": 0.92,
+    "timestamp": "2025-07-04T11:57:10.925066"
+  },
+  {
+    "image_path": "test_images\\dfdfs.jpg",
+    "prediction": "Good",
+    "confidence": 0.88,
+    "timestamp": "2025-07-04T11:57:11.841633"
+  },
+  {
+    "image_path": "test_images\\hole.jpg",
+    "prediction": "Defective",
+    "confidence": 0.77,
+    "timestamp": "2025-07-04T11:57:12.648256"
+  },
+  {
+    "image_path": "test_images\\PCB1.jpg",
+    "prediction": "Good",
+    "confidence": 0.88,
+    "timestamp": "2025-07-04T11:57:13.488378"
+  }
+]
