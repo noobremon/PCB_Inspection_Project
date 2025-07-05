@@ -19,6 +19,7 @@ class PCBInspectionSystem:
             random_state=42
         )
         self.feature_extractor = PCBFeatureExtractor()
+        self.defect_detector = PCBDefectDetector()
         self.is_trained = False
         self.model_path = "models/pcb_classifier.pkl"
         self.stats_path = "models/training_stats.json"
@@ -228,11 +229,51 @@ class PCBInspectionSystem:
                 'timestamp': datetime.now().isoformat()
             }
             
+            # If defective, show visual analysis
+            if prediction == 1:  # Defective
+                self.show_defect_analysis(image, image_path, result)
+            
             return result
             
         except Exception as e:
             print(f"Error inspecting PCB: {str(e)}")
             return None
+    
+    def show_defect_analysis(self, image, image_path, result):
+        """Show defect analysis in a popup window"""
+        try:
+            print("Displaying defect analysis...")
+            defect_image = self.defect_detector.detect_and_highlight_defects(image)
+            
+            # Create a display window
+            window_name = f"PCB Defect Analysis - {os.path.basename(image_path)}"
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            
+            # Add text overlay with prediction info
+            display_image = defect_image.copy()
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text1 = f"Prediction: {result['prediction']}"
+            text2 = f"Confidence: {result['confidence']:.2f}"
+            text3 = "Press any key to close"
+            
+            cv2.putText(display_image, text1, (10, 30), font, 1, (0, 0, 255), 2)
+            cv2.putText(display_image, text2, (10, 70), font, 1, (0, 0, 255), 2)
+            cv2.putText(display_image, text3, (10, display_image.shape[0] - 20), font, 0.7, (255, 255, 255), 2)
+            
+            # Resize image for display if it's too large
+            height, width = display_image.shape[:2]
+            if height > 800 or width > 1200:
+                scale = min(800/height, 1200/width)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                display_image = cv2.resize(display_image, (new_width, new_height))
+            
+            cv2.imshow(window_name, display_image)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+            
+        except Exception as e:
+            print(f"Error displaying defect analysis: {str(e)}")
     
     def batch_inspect(self, test_directory="test_images"):
         """Inspect all images in a directory"""
@@ -260,6 +301,191 @@ class PCBInspectionSystem:
                 print(f"Failed to process {filename}")
         
         return results
+
+
+class PCBDefectDetector:
+    def __init__(self):
+        self.gaussian_kernel_size = 5
+        self.threshold_value = 50
+        self.min_contour_area = 100
+        
+    def detect_and_highlight_defects(self, image):
+        """Detect potential defects and highlight them with circles"""
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Apply Gaussian blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (self.gaussian_kernel_size, self.gaussian_kernel_size), 0)
+            
+            # Apply edge detection
+            edges = cv2.Canny(blurred, 50, 150)
+            
+            # Apply morphological operations to enhance defects
+            kernel = np.ones((3, 3), np.uint8)
+            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            edges = cv2.morphologyEx(edges, cv2.MORPH_OPEN, kernel)
+            
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Create a copy of the original image for highlighting
+            result_image = image.copy()
+            
+            # Additional defect detection methods
+            defect_regions = []
+            
+            # Method 1: Detect bright spots (potential soldering defects)
+            bright_spots = self._detect_bright_spots(gray)
+            defect_regions.extend(bright_spots)
+            
+            # Method 2: Detect dark spots (potential missing components)
+            dark_spots = self._detect_dark_spots(gray)
+            defect_regions.extend(dark_spots)
+            
+            # Method 3: Detect irregular contours
+            irregular_contours = self._detect_irregular_contours(contours)
+            defect_regions.extend(irregular_contours)
+            
+            # Method 4: Detect texture anomalies
+            texture_anomalies = self._detect_texture_anomalies(gray)
+            defect_regions.extend(texture_anomalies)
+            
+            # Highlight all detected defect regions
+            for region in defect_regions:
+                x, y, w, h = region
+                # Draw rectangle around defect
+                cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                # Draw circle at center
+                center_x = x + w // 2
+                center_y = y + h // 2
+                cv2.circle(result_image, (center_x, center_y), max(w, h) // 2, (0, 255, 255), 2)
+                # Add defect label
+                cv2.putText(result_image, "DEFECT", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            # If no specific defects found, highlight areas with high edge density
+            if not defect_regions:
+                result_image = self._highlight_edge_dense_areas(result_image, edges)
+            
+            return result_image
+            
+        except Exception as e:
+            print(f"Error in defect detection: {str(e)}")
+            return image
+    
+    def _detect_bright_spots(self, gray):
+        """Detect bright spots that might indicate soldering defects"""
+        spots = []
+        try:
+            # Threshold for bright spots
+            _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            
+            # Find contours of bright spots
+            contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > 50:  # Filter small noise
+                    x, y, w, h = cv2.boundingRect(contour)
+                    spots.append((x, y, w, h))
+                    
+        except Exception as e:
+            print(f"Error detecting bright spots: {str(e)}")
+            
+        return spots
+    
+    def _detect_dark_spots(self, gray):
+        """Detect dark spots that might indicate missing components"""
+        spots = []
+        try:
+            # Threshold for dark spots
+            _, dark_mask = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+            
+            # Find contours of dark spots
+            contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > 100:  # Filter small noise
+                    x, y, w, h = cv2.boundingRect(contour)
+                    spots.append((x, y, w, h))
+                    
+        except Exception as e:
+            print(f"Error detecting dark spots: {str(e)}")
+            
+        return spots
+    
+    def _detect_irregular_contours(self, contours):
+        """Detect irregular contours that might indicate defects"""
+        irregular_regions = []
+        try:
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > self.min_contour_area:
+                    # Calculate contour properties
+                    perimeter = cv2.arcLength(contour, True)
+                    if perimeter > 0:
+                        # Circularity measure
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        
+                        # If contour is very irregular (low circularity), mark as potential defect
+                        if circularity < 0.3:
+                            x, y, w, h = cv2.boundingRect(contour)
+                            irregular_regions.append((x, y, w, h))
+                            
+        except Exception as e:
+            print(f"Error detecting irregular contours: {str(e)}")
+            
+        return irregular_regions
+    
+    def _detect_texture_anomalies(self, gray):
+        """Detect texture anomalies using local standard deviation"""
+        anomalies = []
+        try:
+            # Calculate local standard deviation
+            kernel = np.ones((15, 15), np.float32) / 225
+            mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
+            sqr_mean = cv2.filter2D((gray.astype(np.float32))**2, -1, kernel)
+            std_dev = np.sqrt(sqr_mean - mean**2)
+            
+            # Threshold for high texture variation
+            _, texture_mask = cv2.threshold(std_dev.astype(np.uint8), 30, 255, cv2.THRESH_BINARY)
+            
+            # Find contours of texture anomalies
+            contours, _ = cv2.findContours(texture_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > 200:  # Filter small variations
+                    x, y, w, h = cv2.boundingRect(contour)
+                    anomalies.append((x, y, w, h))
+                    
+        except Exception as e:
+            print(f"Error detecting texture anomalies: {str(e)}")
+            
+        return anomalies
+    
+    def _highlight_edge_dense_areas(self, image, edges):
+        """Highlight areas with high edge density as potential defects"""
+        try:
+            # Divide image into regions and calculate edge density
+            height, width = edges.shape
+            region_size = 50
+            
+            for y in range(0, height - region_size, region_size):
+                for x in range(0, width - region_size, region_size):
+                    region = edges[y:y+region_size, x:x+region_size]
+                    edge_density = np.sum(region) / (region_size * region_size * 255)
+                    
+                    # If edge density is high, mark as potential defect area
+                    if edge_density > 0.1:
+                        cv2.rectangle(image, (x, y), (x + region_size, y + region_size), (255, 0, 0), 1)
+                        cv2.putText(image, "ANOMALY", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1)
+                        
+        except Exception as e:
+            print(f"Error highlighting edge dense areas: {str(e)}")
+            
+        return image
 
 
 class PCBFeatureExtractor:
@@ -549,6 +775,9 @@ def inspect_single_image_option(inspector):
         print(f"Image: {result['image_path']}")
         print(f"Prediction: {result['prediction']}")
         print(f"Confidence: {result['confidence']:.2f}")
+        
+        if result['prediction'] == 'Defective':
+            print("Defect visualization has been displayed in a popup window.")
     else:
         print("Failed to inspect the image.")
 
@@ -578,6 +807,9 @@ def batch_inspect_option(inspector):
         good_count = sum(1 for r in results if r['prediction'] == 'Good')
         defective_count = len(results) - good_count
         print(f"Summary: {good_count} Good, {defective_count} Defective")
+        
+        if defective_count > 0:
+            print("Defective images were displayed with visual analysis.")
 
 def view_training_stats_option(inspector):
     if os.path.exists(inspector.stats_path):
