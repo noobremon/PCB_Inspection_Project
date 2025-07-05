@@ -1,8 +1,8 @@
 {
-  "training_date": "2025-07-05T16:37:29.964395",
-  "total_samples": 39,
+  "training_date": "2025-07-06T03:42:24.891921",
+  "total_samples": 467,
   "good_samples": 4,
-  "defective_samples": 35,
+  "defective_samples": 463,
   "validation_accuracy": 1.0,
   "feature_count": 71,
   "classes_in_training": 2,
