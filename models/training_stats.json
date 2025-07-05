@@ -1,10 +1,10 @@
 {
-  "training_date": "2025-07-05T15:17:09.015776",
+  "training_date": "2025-07-05T16:37:29.964395",
   "total_samples": 39,
   "good_samples": 4,
   "defective_samples": 35,
   "validation_accuracy": 1.0,
-  "feature_count": 64,
+  "feature_count": 71,
   "classes_in_training": 2,
   "classes_in_test": 2
 }

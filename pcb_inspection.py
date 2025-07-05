@@ -305,12 +305,17 @@ class PCBInspectionSystem:
 
 class PCBDefectDetector:
     def __init__(self):
-        self.gaussian_kernel_size = 5
-        self.threshold_value = 50
-        self.min_contour_area = 100
+        # More conservative parameters for better accuracy
+        self.gaussian_kernel_size = 3
+        self.min_defect_area = 200  # Increased minimum area
+        self.max_defect_area = 5000  # Maximum area to avoid large false positives
+        self.bright_threshold = 220  # Higher threshold for bright defects
+        self.dark_threshold = 40     # Lower threshold for dark defects
+        self.edge_threshold_low = 100
+        self.edge_threshold_high = 200
         
     def detect_and_highlight_defects(self, image):
-        """Detect potential defects and highlight them with circles"""
+        """Detect and highlight only actual defects with improved accuracy"""
         try:
             # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -318,54 +323,65 @@ class PCBDefectDetector:
             # Apply Gaussian blur to reduce noise
             blurred = cv2.GaussianBlur(gray, (self.gaussian_kernel_size, self.gaussian_kernel_size), 0)
             
-            # Apply edge detection
-            edges = cv2.Canny(blurred, 50, 150)
-            
-            # Apply morphological operations to enhance defects
-            kernel = np.ones((3, 3), np.uint8)
-            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-            edges = cv2.morphologyEx(edges, cv2.MORPH_OPEN, kernel)
-            
-            # Find contours
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
             # Create a copy of the original image for highlighting
             result_image = image.copy()
             
-            # Additional defect detection methods
+            # Detect defects using multiple methods with stricter criteria
             defect_regions = []
             
-            # Method 1: Detect bright spots (potential soldering defects)
-            bright_spots = self._detect_bright_spots(gray)
-            defect_regions.extend(bright_spots)
+            # Method 1: Detect significant bright anomalies (soldering issues)
+            bright_defects = self._detect_bright_defects(blurred)
+            defect_regions.extend(bright_defects)
             
-            # Method 2: Detect dark spots (potential missing components)
-            dark_spots = self._detect_dark_spots(gray)
-            defect_regions.extend(dark_spots)
+            # Method 2: Detect significant dark anomalies (missing components)
+            dark_defects = self._detect_dark_defects(blurred)
+            defect_regions.extend(dark_defects)
             
-            # Method 3: Detect irregular contours
-            irregular_contours = self._detect_irregular_contours(contours)
-            defect_regions.extend(irregular_contours)
+            # Method 3: Detect structural anomalies using edge analysis
+            structural_defects = self._detect_structural_defects(blurred)
+            defect_regions.extend(structural_defects)
             
-            # Method 4: Detect texture anomalies
-            texture_anomalies = self._detect_texture_anomalies(gray)
-            defect_regions.extend(texture_anomalies)
+            # Method 4: Detect surface defects (scratches, burns)
+            surface_defects = self._detect_surface_defects(blurred)
+            defect_regions.extend(surface_defects)
             
-            # Highlight all detected defect regions
-            for region in defect_regions:
-                x, y, w, h = region
+            # Remove overlapping defects and filter by size
+            filtered_defects = self._filter_and_merge_defects(defect_regions)
+            
+            # Highlight only the filtered defects
+            defect_count = 0
+            for defect in filtered_defects:
+                x, y, w, h, defect_type = defect
+                
+                # Different colors for different defect types
+                color_map = {
+                    'bright': (0, 255, 255),    # Yellow for bright defects
+                    'dark': (255, 0, 0),        # Blue for dark defects
+                    'structural': (0, 0, 255),  # Red for structural defects
+                    'surface': (255, 0, 255)    # Magenta for surface defects
+                }
+                
+                color = color_map.get(defect_type, (0, 0, 255))
+                
                 # Draw rectangle around defect
-                cv2.rectangle(result_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                cv2.rectangle(result_image, (x, y), (x + w, y + h), color, 2)
+                
                 # Draw circle at center
                 center_x = x + w // 2
                 center_y = y + h // 2
-                cv2.circle(result_image, (center_x, center_y), max(w, h) // 2, (0, 255, 255), 2)
+                cv2.circle(result_image, (center_x, center_y), 10, color, 2)
+                
                 # Add defect label
-                cv2.putText(result_image, "DEFECT", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                label = f"{defect_type.upper()}"
+                cv2.putText(result_image, label, (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                defect_count += 1
             
-            # If no specific defects found, highlight areas with high edge density
-            if not defect_regions:
-                result_image = self._highlight_edge_dense_areas(result_image, edges)
+            # Add defect count to image
+            cv2.putText(result_image, f"Defects Found: {defect_count}", 
+                       (10, result_image.shape[0] - 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             return result_image
             
@@ -373,119 +389,187 @@ class PCBDefectDetector:
             print(f"Error in defect detection: {str(e)}")
             return image
     
-    def _detect_bright_spots(self, gray):
-        """Detect bright spots that might indicate soldering defects"""
-        spots = []
+    def _detect_bright_defects(self, gray):
+        """Detect bright defects like excess solder or burn marks"""
+        defects = []
         try:
-            # Threshold for bright spots
-            _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            # Create mask for very bright areas
+            _, bright_mask = cv2.threshold(gray, self.bright_threshold, 255, cv2.THRESH_BINARY)
             
-            # Find contours of bright spots
+            # Apply morphological operations to clean up the mask
+            kernel = np.ones((3, 3), np.uint8)
+            bright_mask = cv2.morphologyEx(bright_mask, cv2.MORPH_CLOSE, kernel)
+            bright_mask = cv2.morphologyEx(bright_mask, cv2.MORPH_OPEN, kernel)
+            
+            # Find contours
             contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area > 50:  # Filter small noise
+                if self.min_defect_area <= area <= self.max_defect_area:
+                    # Check if it's a real defect by analyzing shape
                     x, y, w, h = cv2.boundingRect(contour)
-                    spots.append((x, y, w, h))
+                    aspect_ratio = w / h
                     
+                    # Filter based on aspect ratio (avoid very elongated shapes)
+                    if 0.3 <= aspect_ratio <= 3.0:
+                        # Check intensity variation within the region
+                        roi = gray[y:y+h, x:x+w]
+                        intensity_std = np.std(roi)
+                        
+                        # If intensity variation is low, it's likely a defect
+                        if intensity_std < 30:
+                            defects.append((x, y, w, h, 'bright'))
+                            
         except Exception as e:
-            print(f"Error detecting bright spots: {str(e)}")
+            print(f"Error detecting bright defects: {str(e)}")
             
-        return spots
+        return defects
     
-    def _detect_dark_spots(self, gray):
-        """Detect dark spots that might indicate missing components"""
-        spots = []
+    def _detect_dark_defects(self, gray):
+        """Detect dark defects like missing components or holes"""
+        defects = []
         try:
-            # Threshold for dark spots
-            _, dark_mask = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+            # Create mask for very dark areas
+            _, dark_mask = cv2.threshold(gray, self.dark_threshold, 255, cv2.THRESH_BINARY_INV)
             
-            # Find contours of dark spots
+            # Apply morphological operations
+            kernel = np.ones((3, 3), np.uint8)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel)
+            
+            # Find contours
             contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area > 100:  # Filter small noise
+                if self.min_defect_area <= area <= self.max_defect_area:
                     x, y, w, h = cv2.boundingRect(contour)
-                    spots.append((x, y, w, h))
+                    aspect_ratio = w / h
                     
-        except Exception as e:
-            print(f"Error detecting dark spots: {str(e)}")
-            
-        return spots
-    
-    def _detect_irregular_contours(self, contours):
-        """Detect irregular contours that might indicate defects"""
-        irregular_regions = []
-        try:
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                if area > self.min_contour_area:
-                    # Calculate contour properties
-                    perimeter = cv2.arcLength(contour, True)
-                    if perimeter > 0:
-                        # Circularity measure
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    # Filter based on aspect ratio
+                    if 0.3 <= aspect_ratio <= 3.0:
+                        # Check if it's surrounded by brighter areas (indicating missing component)
+                        roi = gray[max(0, y-10):min(gray.shape[0], y+h+10), 
+                                  max(0, x-10):min(gray.shape[1], x+w+10)]
+                        roi_center = gray[y:y+h, x:x+w]
                         
-                        # If contour is very irregular (low circularity), mark as potential defect
-                        if circularity < 0.3:
-                            x, y, w, h = cv2.boundingRect(contour)
-                            irregular_regions.append((x, y, w, h))
+                        if np.mean(roi) - np.mean(roi_center) > 50:  # Significant contrast
+                            defects.append((x, y, w, h, 'dark'))
                             
         except Exception as e:
-            print(f"Error detecting irregular contours: {str(e)}")
+            print(f"Error detecting dark defects: {str(e)}")
             
-        return irregular_regions
+        return defects
     
-    def _detect_texture_anomalies(self, gray):
-        """Detect texture anomalies using local standard deviation"""
-        anomalies = []
+    def _detect_structural_defects(self, gray):
+        """Detect structural defects using edge analysis"""
+        defects = []
         try:
-            # Calculate local standard deviation
-            kernel = np.ones((15, 15), np.float32) / 225
+            # Apply Canny edge detection
+            edges = cv2.Canny(gray, self.edge_threshold_low, self.edge_threshold_high)
+            
+            # Apply morphological operations to connect broken edges
+            kernel = np.ones((3, 3), np.uint8)
+            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if self.min_defect_area <= area <= self.max_defect_area:
+                    # Analyze contour properties
+                    perimeter = cv2.arcLength(contour, True)
+                    if perimeter > 0:
+                        # Calculate solidity (area/convex hull area)
+                        hull = cv2.convexHull(contour)
+                        hull_area = cv2.contourArea(hull)
+                        
+                        if hull_area > 0:
+                            solidity = area / hull_area
+                            
+                            # Low solidity indicates irregular shape (potential defect)
+                            if solidity < 0.7:
+                                x, y, w, h = cv2.boundingRect(contour)
+                                defects.append((x, y, w, h, 'structural'))
+                                
+        except Exception as e:
+            print(f"Error detecting structural defects: {str(e)}")
+            
+        return defects
+    
+    def _detect_surface_defects(self, gray):
+        """Detect surface defects using texture analysis"""
+        defects = []
+        try:
+            # Apply local standard deviation filter
+            kernel = np.ones((9, 9), np.float32) / 81
             mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
             sqr_mean = cv2.filter2D((gray.astype(np.float32))**2, -1, kernel)
             std_dev = np.sqrt(sqr_mean - mean**2)
             
             # Threshold for high texture variation
-            _, texture_mask = cv2.threshold(std_dev.astype(np.uint8), 30, 255, cv2.THRESH_BINARY)
+            _, texture_mask = cv2.threshold(std_dev.astype(np.uint8), 40, 255, cv2.THRESH_BINARY)
             
-            # Find contours of texture anomalies
+            # Apply morphological operations
+            kernel = np.ones((5, 5), np.uint8)
+            texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_CLOSE, kernel)
+            texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_OPEN, kernel)
+            
+            # Find contours
             contours, _ = cv2.findContours(texture_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area > 200:  # Filter small variations
+                if self.min_defect_area <= area <= self.max_defect_area:
                     x, y, w, h = cv2.boundingRect(contour)
-                    anomalies.append((x, y, w, h))
                     
-        except Exception as e:
-            print(f"Error detecting texture anomalies: {str(e)}")
-            
-        return anomalies
-    
-    def _highlight_edge_dense_areas(self, image, edges):
-        """Highlight areas with high edge density as potential defects"""
-        try:
-            # Divide image into regions and calculate edge density
-            height, width = edges.shape
-            region_size = 50
-            
-            for y in range(0, height - region_size, region_size):
-                for x in range(0, width - region_size, region_size):
-                    region = edges[y:y+region_size, x:x+region_size]
-                    edge_density = np.sum(region) / (region_size * region_size * 255)
-                    
-                    # If edge density is high, mark as potential defect area
-                    if edge_density > 0.1:
-                        cv2.rectangle(image, (x, y), (x + region_size, y + region_size), (255, 0, 0), 1)
-                        cv2.putText(image, "ANOMALY", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1)
+                    # Check if the texture variation is consistent (not noise)
+                    roi = std_dev[y:y+h, x:x+w]
+                    if np.mean(roi) > 35:  # Consistent high variation
+                        defects.append((x, y, w, h, 'surface'))
                         
         except Exception as e:
-            print(f"Error highlighting edge dense areas: {str(e)}")
+            print(f"Error detecting surface defects: {str(e)}")
             
-        return image
+        return defects
+    
+    def _filter_and_merge_defects(self, defects):
+        """Filter and merge overlapping defects"""
+        if not defects:
+            return []
+        
+        # Sort by area (larger defects first)
+        defects = sorted(defects, key=lambda x: x[2] * x[3], reverse=True)
+        
+        filtered_defects = []
+        
+        for current_defect in defects:
+            x1, y1, w1, h1, type1 = current_defect
+            
+            # Check if this defect overlaps significantly with any existing defect
+            is_duplicate = False
+            for existing_defect in filtered_defects:
+                x2, y2, w2, h2, type2 = existing_defect
+                
+                # Calculate overlap
+                overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+                overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                overlap_area = overlap_x * overlap_y
+                
+                current_area = w1 * h1
+                existing_area = w2 * h2
+                
+                # If overlap is more than 50% of current defect area, consider it duplicate
+                if overlap_area > 0.5 * current_area:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                filtered_defects.append(current_defect)
+        
+        return filtered_defects
 
 
 class PCBFeatureExtractor:
@@ -610,20 +694,29 @@ class PCBFeatureExtractor:
         try:
             # Canny edge detection
             edges = cv2.Canny(gray, 50, 150)
-            features.append(np.sum(edges) / (edges.shape[0] * edges.shape[1]))  # Edge density
             
-            # Sobel gradients
+            # Edge density
+            edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+            features.append(edge_density)
+            
+            # Edge direction histogram
             grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
             grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
             
-            features.append(np.mean(np.abs(grad_x)))
-            features.append(np.mean(np.abs(grad_y)))
-            features.append(np.std(grad_x))
-            features.append(np.std(grad_y))
+            # Avoid division by zero
+            grad_x = np.where(grad_x == 0, 1e-10, grad_x)
+            angles = np.arctan2(grad_y, grad_x)
+            
+            # Quantize angles into 8 bins
+            angles_quantized = np.digitize(angles, np.linspace(-np.pi, np.pi, 9)) - 1
+            angle_hist = np.bincount(angles_quantized.flatten(), minlength=8)
+            if angle_hist.sum() > 0:
+                angle_hist = angle_hist / angle_hist.sum()
+            features.extend(angle_hist)
             
         except Exception as e:
             print(f"Error in edge features: {str(e)}")
-            features = [0.0] * 5  # Return zeros if calculation fails
+            features = [0.0] * 9  # Return zeros if calculation fails
             
         return features
     
@@ -633,13 +726,15 @@ class PCBFeatureExtractor:
         try:
             # BGR channel statistics
             for channel in range(3):
-                features.append(np.mean(bgr_image[:, :, channel]))
-                features.append(np.std(bgr_image[:, :, channel]))
+                channel_data = bgr_image[:, :, channel]
+                features.append(np.mean(channel_data))
+                features.append(np.std(channel_data))
             
             # HSV channel statistics
             for channel in range(3):
-                features.append(np.mean(hsv_image[:, :, channel]))
-                features.append(np.std(hsv_image[:, :, channel]))
+                channel_data = hsv_image[:, :, channel]
+                features.append(np.mean(channel_data))
+                features.append(np.std(channel_data))
                 
         except Exception as e:
             print(f"Error in color features: {str(e)}")
@@ -651,32 +746,36 @@ class PCBFeatureExtractor:
         """Extract contour-based features"""
         features = []
         try:
-            # Apply threshold to get binary image for better contour detection
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
             # Find contours
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            if len(contours) > 0:
+            if contours:
                 # Number of contours
                 features.append(len(contours))
                 
-                # Area statistics
+                # Statistics of contour areas
                 areas = [cv2.contourArea(c) for c in contours if cv2.contourArea(c) > 10]
-                features.append(np.mean(areas) if areas else 0)
-                features.append(np.std(areas) if areas else 0)
-                features.append(max(areas) if areas else 0)
+                if areas:
+                    features.append(np.mean(areas))
+                    features.append(np.std(areas))
+                    features.append(np.max(areas))
+                    features.append(np.min(areas))
+                else:
+                    features.extend([0.0, 0.0, 0.0, 0.0])
                 
-                # Perimeter statistics
-                perimeters = [cv2.arcLength(c, True) for c in contours if cv2.contourArea(c) > 10]
-                features.append(np.mean(perimeters) if perimeters else 0)
-                features.append(np.std(perimeters) if perimeters else 0)
+                # Statistics of contour perimeters
+                perimeters = [cv2.arcLength(c, True) for c in contours if cv2.arcLength(c, True) > 10]
+                if perimeters:
+                    features.append(np.mean(perimeters))
+                    features.append(np.std(perimeters))
+                else:
+                    features.extend([0.0, 0.0])
             else:
-                features.extend([0] * 6)
+                features.extend([0.0] * 7)
                 
         except Exception as e:
             print(f"Error in contour features: {str(e)}")
-            features = [0.0] * 6  # Return zeros if calculation fails
+            features = [0.0] * 7  # Return zeros if calculation fails
             
         return features
     
@@ -689,146 +788,373 @@ class PCBFeatureExtractor:
             f_shift = np.fft.fftshift(f_transform)
             magnitude_spectrum = np.abs(f_shift)
             
-            # Statistical features of magnitude spectrum
+            # Log transform to reduce dynamic range
+            magnitude_spectrum = np.log(magnitude_spectrum + 1)
+            
+            # Extract features from frequency domain
             features.append(np.mean(magnitude_spectrum))
             features.append(np.std(magnitude_spectrum))
             features.append(np.max(magnitude_spectrum))
+            features.append(np.min(magnitude_spectrum))
             
         except Exception as e:
             print(f"Error in frequency features: {str(e)}")
-            features = [0.0] * 3  # Return zeros if calculation fails
+            features = [0.0] * 4  # Return zeros if calculation fails
             
         return features
 
 
-def main():
-    """Main function to demonstrate the PCB inspection system"""
-    inspector = PCBInspectionSystem()
-    print("PCB Automated Optical Inspection System")
-    print("=" * 40)
-    
-    menu_options = {
-        '1': lambda: train_model_option(inspector),
-        '2': lambda: inspect_single_image_option(inspector),
-        '3': lambda: batch_inspect_option(inspector),
-        '4': lambda: view_training_stats_option(inspector),
-        '5': exit_option
-    }
-    
-    while True:
-        print_menu()
-        choice = input("\nEnter your choice (1-5): ").strip()
-        action = menu_options.get(choice, invalid_choice_option)
-        if action() == "exit":
-            break
-
-def print_menu():
-    print("\nOptions:")
-    print("1. Train the model")
-    print("2. Inspect a single PCB image")
-    print("3. Batch inspect images")
-    print("4. View training statistics")
-    print("5. Exit")
-
-def train_model_option(inspector):
-    print("\nTraining the model...")
-    
-    # Check if dataset directories exist
-    good_dir = "dataset/good"
-    defective_dir = "dataset/defective"
-    
-    if not os.path.exists(good_dir):
-        print(f"Creating directory: {good_dir}")
-        os.makedirs(good_dir, exist_ok=True)
+# Fixed PCBDefectDetector class with more precise defect detection
+class PCBDefectDetectorFixed:
+    def __init__(self):
+        # Much more conservative parameters to reduce false positives
+        self.gaussian_kernel_size = 5
+        self.min_defect_area = 500      # Increased significantly
+        self.max_defect_area = 8000     # Limit maximum area
+        self.bright_threshold = 240     # Much higher threshold
+        self.dark_threshold = 25        # Much lower threshold
+        self.edge_threshold_low = 150   # Higher edge thresholds
+        self.edge_threshold_high = 250
+        self.morphology_kernel_size = 7  # Larger kernel for better noise reduction
         
-    if not os.path.exists(defective_dir):
-        print(f"Creating directory: {defective_dir}")
-        os.makedirs(defective_dir, exist_ok=True)
+    def detect_and_highlight_defects(self, image):
+        """Detect and highlight only significant defects with high precision"""
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Apply stronger noise reduction
+            denoised = cv2.bilateralFilter(gray, 15, 35, 35)
+            blurred = cv2.GaussianBlur(denoised, (self.gaussian_kernel_size, self.gaussian_kernel_size), 0)
+            
+            # Create a copy of the original image for highlighting
+            result_image = image.copy()
+            
+            # Only detect the most obvious defects
+            defect_regions = []
+            
+            # Method 1: Detect extreme bright anomalies only
+            extreme_bright_defects = self._detect_extreme_bright_defects(blurred, gray)
+            defect_regions.extend(extreme_bright_defects)
+            
+            # Method 2: Detect missing components (large dark areas)
+            missing_components = self._detect_missing_components(blurred, gray)
+            defect_regions.extend(missing_components)
+            
+            # Method 3: Detect broken traces or major structural issues
+            structural_breaks = self._detect_structural_breaks(blurred, gray)
+            defect_regions.extend(structural_breaks)
+            
+            # Apply strict filtering
+            filtered_defects = self._strict_defect_filtering(defect_regions, gray)
+            
+            # Highlight only the filtered defects
+            defect_count = 0
+            for defect in filtered_defects:
+                x, y, w, h, defect_type, confidence = defect
+                
+                # Only show defects with high confidence
+                if confidence > 0.7:
+                    color_map = {
+                        'extreme_bright': (0, 255, 255),    # Yellow for extreme bright
+                        'missing_component': (255, 0, 0),   # Blue for missing components
+                        'structural_break': (0, 0, 255),    # Red for structural breaks
+                    }
+                    
+                    color = color_map.get(defect_type, (0, 0, 255))
+                    
+                    # Draw rectangle around defect
+                    cv2.rectangle(result_image, (x, y), (x + w, y + h), color, 3)
+                    
+                    # Draw circle at center
+                    center_x = x + w // 2
+                    center_y = y + h // 2
+                    cv2.circle(result_image, (center_x, center_y), 8, color, -1)
+                    
+                    # Add defect label with confidence
+                    label = f"{defect_type.upper()} ({confidence:.2f})"
+                    cv2.putText(result_image, label, (x, y - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    
+                    defect_count += 1
+            
+            # Add defect count to image
+            cv2.putText(result_image, f"Critical Defects: {defect_count}", 
+                       (10, result_image.shape[0] - 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            
+            return result_image
+            
+        except Exception as e:
+            print(f"Error in defect detection: {str(e)}")
+            return image
     
-    # Check if directories have images
-    good_images = len([f for f in os.listdir(good_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
-    defective_images = len([f for f in os.listdir(defective_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+    def _detect_extreme_bright_defects(self, blurred, original_gray):
+        """Detect only extreme bright defects like severe burn marks or excess solder"""
+        defects = []
+        try:
+            # Use adaptive thresholding to account for lighting variations
+            mean_intensity = np.mean(blurred)
+            adaptive_threshold = max(self.bright_threshold, mean_intensity + 50)
+            
+            # Create mask for extremely bright areas
+            _, bright_mask = cv2.threshold(blurred, adaptive_threshold, 255, cv2.THRESH_BINARY)
+            
+            # Apply strong morphological operations to reduce noise
+            kernel = np.ones((self.morphology_kernel_size, self.morphology_kernel_size), np.uint8)
+            bright_mask = cv2.morphologyEx(bright_mask, cv2.MORPH_CLOSE, kernel)
+            bright_mask = cv2.morphologyEx(bright_mask, cv2.MORPH_OPEN, kernel)
+            
+            # Remove small connected components
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(bright_mask, connectivity=8)
+            
+            for i in range(1, num_labels):  # Skip background
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area >= self.min_defect_area:
+                    x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+                    
+                    # Calculate confidence based on intensity contrast
+                    roi = original_gray[y:y+h, x:x+w]
+                    surrounding_area = self._get_surrounding_area(original_gray, x, y, w, h)
+                    
+                    if surrounding_area is not None and len(surrounding_area) > 0:
+                        contrast = np.mean(roi) - np.mean(surrounding_area)
+                        confidence = min(1.0, contrast / 100.0)  # Normalize confidence
+                        
+                        if confidence > 0.5:  # Only high confidence defects
+                            defects.append((x, y, w, h, 'extreme_bright', confidence))
+                            
+        except Exception as e:
+            print(f"Error detecting extreme bright defects: {str(e)}")
+            
+        return defects
     
-    if good_images == 0 or defective_images == 0:
-        print("\nDataset Setup Required:")
-        print(f"Good PCB images: {good_images} (in {good_dir})")
-        print(f"Defective PCB images: {defective_images} (in {defective_dir})")
-        print("\nPlease add images to both directories before training.")
-        return
+    def _detect_missing_components(self, blurred, original_gray):
+        """Detect missing components (large dark areas where components should be)"""
+        defects = []
+        try:
+            # Use adaptive thresholding for dark areas
+            mean_intensity = np.mean(blurred)
+            adaptive_threshold = min(self.dark_threshold, mean_intensity - 30)
+            
+            # Create mask for extremely dark areas
+            _, dark_mask = cv2.threshold(blurred, adaptive_threshold, 255, cv2.THRESH_BINARY_INV)
+            
+            # Apply morphological operations
+            kernel = np.ones((self.morphology_kernel_size, self.morphology_kernel_size), np.uint8)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel)
+            dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel)
+            
+            # Remove small connected components
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dark_mask, connectivity=8)
+            
+            for i in range(1, num_labels):  # Skip background
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area >= self.min_defect_area:
+                    x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+                    
+                    # Check if it's really a missing component by analyzing surroundings
+                    roi = original_gray[y:y+h, x:x+w]
+                    surrounding_area = self._get_surrounding_area(original_gray, x, y, w, h)
+                    
+                    if surrounding_area is not None and len(surrounding_area) > 0:
+                        # Missing components should have bright surroundings
+                        contrast = np.mean(surrounding_area) - np.mean(roi)
+                        confidence = min(1.0, contrast / 80.0)
+                        
+                        # Also check if the dark area is roughly rectangular (component-like)
+                        aspect_ratio = w / h
+                        if 0.5 <= aspect_ratio <= 2.0 and confidence > 0.6:
+                            defects.append((x, y, w, h, 'missing_component', confidence))
+                            
+        except Exception as e:
+            print(f"Error detecting missing components: {str(e)}")
+            
+        return defects
     
-    success = inspector.train_model()
-    if success:
-        print("Model training completed successfully!")
-    else:
-        print("Model training failed. Please check your dataset and try again.")
-
-def inspect_single_image_option(inspector):
-    image_path = input("Enter the path to the PCB image: ").strip()
+    def _detect_structural_breaks(self, blurred, original_gray):
+        """Detect structural breaks in traces or major damage"""
+        defects = []
+        try:
+            # Use Canny edge detection with higher thresholds
+            edges = cv2.Canny(blurred, self.edge_threshold_low, self.edge_threshold_high)
+            
+            # Look for breaks in continuity (gaps in edges where there should be connections)
+            # This is a simplified approach - in practice, you'd need template matching
+            
+            # Apply morphological operations to find disconnected regions
+            kernel = np.ones((15, 15), np.uint8)  # Larger kernel to find major breaks
+            dilated = cv2.dilate(edges, kernel, iterations=1)
+            eroded = cv2.erode(dilated, kernel, iterations=1)
+            
+            # Find contours of potential breaks
+            contours, _ = cv2.findContours(eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area >= self.min_defect_area:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    
+                    # Check if it's a real structural break
+                    perimeter = cv2.arcLength(contour, True)
+                    if perimeter > 0:
+                        # Calculate form factor (4π*area/perimeter²)
+                        form_factor = 4 * np.pi * area / (perimeter * perimeter)
+                        
+                        # Structural breaks usually have irregular shapes
+                        if form_factor < 0.5:  # Irregular shape
+                            confidence = 1.0 - form_factor  # More irregular = higher confidence
+                            defects.append((x, y, w, h, 'structural_break', confidence))
+                            
+        except Exception as e:
+            print(f"Error detecting structural breaks: {str(e)}")
+            
+        return defects
     
-    if not os.path.exists(image_path):
-        print(f"Error: File {image_path} does not exist.")
-        return
-        
-    result = inspector.inspect_pcb(image_path)
-    if result:
-        print("\nInspection Result:")
-        print(f"Image: {result['image_path']}")
-        print(f"Prediction: {result['prediction']}")
-        print(f"Confidence: {result['confidence']:.2f}")
-        
-        if result['prediction'] == 'Defective':
-            print("Defect visualization has been displayed in a popup window.")
-    else:
-        print("Failed to inspect the image.")
-
-def batch_inspect_option(inspector):
-    test_dir = input("Enter test directory path (or press Enter for 'test_images'): ").strip()
-    if not test_dir:
-        test_dir = "test_images"
-        
-    if not os.path.exists(test_dir):
-        print(f"Creating test directory: {test_dir}")
-        os.makedirs(test_dir, exist_ok=True)
-        print(f"Please add images to {test_dir} and try again.")
-        return
-        
-    results = inspector.batch_inspect(test_dir)
-    print(f"\nBatch inspection completed. Processed {len(results)} images.")
+    def _get_surrounding_area(self, image, x, y, w, h):
+        """Get pixels surrounding a region for contrast analysis"""
+        try:
+            # Define surrounding area (border around the region)
+            border_size = 20
+            y_start = max(0, y - border_size)
+            y_end = min(image.shape[0], y + h + border_size)
+            x_start = max(0, x - border_size)
+            x_end = min(image.shape[1], x + w + border_size)
+            
+            # Extract surrounding area
+            surrounding_roi = image[y_start:y_end, x_start:x_end]
+            
+            # Create mask to exclude the central region
+            mask = np.ones(surrounding_roi.shape, dtype=bool)
+            inner_y_start = max(0, y - y_start)
+            inner_y_end = min(surrounding_roi.shape[0], y + h - y_start)
+            inner_x_start = max(0, x - x_start)
+            inner_x_end = min(surrounding_roi.shape[1], x + w - x_start)
+            
+            mask[inner_y_start:inner_y_end, inner_x_start:inner_x_end] = False
+            
+            return surrounding_roi[mask]
+            
+        except Exception as e:
+            print(f"Error getting surrounding area: {str(e)}")
+            return None
     
-    if results:
-        # Save results
-        results_file = f"results/inspection_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        os.makedirs("results", exist_ok=True)
-        with open(results_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        print(f"Results saved to {results_file}")
+    def _strict_defect_filtering(self, defects, gray):
+        """Apply strict filtering to remove false positives"""
+        filtered_defects = []
         
-        # Show summary
-        good_count = sum(1 for r in results if r['prediction'] == 'Good')
-        defective_count = len(results) - good_count
-        print(f"Summary: {good_count} Good, {defective_count} Defective")
+        for defect in defects:
+            x, y, w, h, defect_type, confidence = defect
+            
+            # Additional checks for each defect type
+            if defect_type == 'extreme_bright':
+                # Check if it's really an anomaly and not just a shiny component
+                roi = gray[y:y+h, x:x+w]
+                intensity_uniformity = np.std(roi)
+                if intensity_uniformity < 20 and confidence > 0.6:  # Uniform bright area
+                    filtered_defects.append(defect)
+                    
+            elif defect_type == 'missing_component':
+                # Check if the dark area is really where a component should be
+                roi = gray[y:y+h, x:x+w]
+                # Missing components should be relatively uniform dark areas
+                intensity_uniformity = np.std(roi)
+                if intensity_uniformity < 15 and confidence > 0.7:
+                    filtered_defects.append(defect)
+                    
+            elif defect_type == 'structural_break':
+                # Only keep high-confidence structural breaks
+                if confidence > 0.8:
+                    filtered_defects.append(defect)
         
-        if defective_count > 0:
-            print("Defective images were displayed with visual analysis.")
-
-def view_training_stats_option(inspector):
-    if os.path.exists(inspector.stats_path):
-        with open(inspector.stats_path, 'r') as f:
-            stats = json.load(f)
-        print("\nTraining Statistics:")
-        print("-" * 30)
-        for key, value in stats.items():
-            print(f"{key.replace('_', ' ').title()}: {value}")
-    else:
-        print("No training statistics available. Train the model first.")
-
-def exit_option():
-    print("Exiting...")
-    return "exit"
-
-def invalid_choice_option():
-    print("Invalid choice. Please enter 1-5.")
+        return filtered_defects
 
 
+# Main execution
 if __name__ == "__main__":
-    main()
+    # Create the inspection system with fixed defect detector
+    inspector = PCBInspectionSystem()
+    inspector.defect_detector = PCBDefectDetectorFixed()  # Use the fixed detector
+    
+    # Check if model exists, if not train it
+    if not inspector.load_model():
+        print("No trained model found. Training new model...")
+        success = inspector.train_model()
+        if not success:
+            print("Training failed. Please check your dataset.")
+            exit()
+    
+    # Interactive menu
+    while True:
+        print("\n=== PCB Inspection System ===")
+        print("1. Train new model")
+        print("2. Inspect single PCB image")
+        print("3. Batch inspect directory")
+        print("4. View training statistics")
+        print("5. Exit")
+        
+        choice = input("\nEnter your choice (1-5): ").strip()
+        
+        if choice == '1':
+            good_dir = input("Enter path to good PCB images directory (default: dataset/good): ").strip()
+            if not good_dir:
+                good_dir = "dataset/good"
+            
+            defective_dir = input("Enter path to defective PCB images directory (default: dataset/defective): ").strip()
+            if not defective_dir:
+                defective_dir = "dataset/defective"
+            
+            success = inspector.train_model(good_dir, defective_dir)
+            if success:
+                print("Model trained successfully!")
+            else:
+                print("Training failed. Please check your dataset.")
+        
+        elif choice == '2':
+            image_path = input("Enter path to PCB image: ").strip()
+            if os.path.exists(image_path):
+                result = inspector.inspect_pcb(image_path)
+                if result:
+                    print(f"\nInspection Result:")
+                    print(f"Image: {result['image_path']}")
+                    print(f"Prediction: {result['prediction']}")
+                    print(f"Confidence: {result['confidence']:.2f}")
+                    print(f"Timestamp: {result['timestamp']}")
+                else:
+                    print("Failed to inspect the image.")
+            else:
+                print("Image file not found.")
+        
+        elif choice == '3':
+            test_dir = input("Enter path to test images directory (default: test_images): ").strip()
+            if not test_dir:
+                test_dir = "test_images"
+            
+            results = inspector.batch_inspect(test_dir)
+            if results:
+                print(f"\nBatch Inspection Results ({len(results)} images):")
+                good_count = sum(1 for r in results if r['prediction'] == 'Good')
+                defective_count = len(results) - good_count
+                print(f"Good PCBs: {good_count}")
+                print(f"Defective PCBs: {defective_count}")
+            else:
+                print("No results to display.")
+        
+        elif choice == '4':
+            if os.path.exists(inspector.stats_path):
+                with open(inspector.stats_path, 'r') as f:
+                    stats = json.load(f)
+                print(f"\nTraining Statistics:")
+                for key, value in stats.items():
+                    print(f"{key}: {value}")
+            else:
+                print("No training statistics found. Train a model first.")
+        
+        elif choice == '5':
+            print("Goodbye!")
+            break
+        
+        else:
+            print("Invalid choice. Please try again.")
+
+print("Script completed")
