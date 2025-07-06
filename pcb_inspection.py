@@ -301,6 +301,168 @@ class PCBInspectionSystem:
                 print(f"Failed to process {filename}")
         
         return results
+    
+    def debug_defect_detection(self, image_path):
+        """Debug method to understand why classification and detection don't match"""
+        if not self.is_trained and not self.load_model():
+            print("Error: No trained model available.")
+            return
+
+        try:
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"Error: Could not load image {image_path}")
+                return
+
+            print(f"=== DEBUG ANALYSIS FOR: {image_path} ===")
+
+            # 1. Get classification result
+            features = self.feature_extractor.extract_features(image)
+            prediction = self.classifier.predict([features])[0]
+            probabilities = self.classifier.predict_proba([features])[0]
+
+            print(f"Classification: {'Defective' if prediction == 1 else 'Good'}")
+            print(f"Probabilities: Good={probabilities[0]:.3f}, Defective={probabilities[1]:.3f}")
+
+            # 2. Analyze the extracted features
+            print(f"\nFeature Analysis:")
+            print(f"Total features extracted: {len(features)}")
+
+            # Get feature importance from Random Forest
+            feature_importance = self.classifier.feature_importances_
+            top_features = np.argsort(feature_importance)[-10:]  # Top 10 most important features
+
+            print(f"Top 10 most important features:")
+            for i, idx in enumerate(reversed(top_features)):
+                print(f"{i+1}. Feature {idx}: {features[idx]:.3f} (importance: {feature_importance[idx]:.3f})")
+
+            # 3. Manual defect detection with debug info
+            print(f"\nDefect Detection Analysis:")
+
+            # Convert to grayscale for analysis
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            denoised = cv2.bilateralFilter(gray, 15, 35, 35)
+            blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
+
+            # Test different threshold values
+            mean_intensity = np.mean(blurred)
+            std_intensity = np.std(blurred)
+
+            print(f"Image statistics:")
+            print(f"  Mean intensity: {mean_intensity:.2f}")
+            print(f"  Std intensity: {std_intensity:.2f}")
+            print(f"  Min intensity: {np.min(blurred):.2f}")
+            print(f"  Max intensity: {np.max(blurred):.2f}")
+
+            # Check for potential defects with lower thresholds
+            print(f"\nTesting with relaxed thresholds:")
+
+            # Test bright defects with lower threshold
+            bright_threshold_relaxed = mean_intensity + 2 * std_intensity
+            _, bright_mask = cv2.threshold(blurred, bright_threshold_relaxed, 255, cv2.THRESH_BINARY)
+            bright_pixels = np.sum(bright_mask > 0)
+            print(f"  Bright anomalies (threshold {bright_threshold_relaxed:.0f}): {bright_pixels} pixels")
+
+            # Test dark defects with higher threshold
+            dark_threshold_relaxed = mean_intensity - 2 * std_intensity
+            _, dark_mask = cv2.threshold(blurred, dark_threshold_relaxed, 255, cv2.THRESH_BINARY_INV)
+            dark_pixels = np.sum(dark_mask > 0)
+            print(f"  Dark anomalies (threshold {dark_threshold_relaxed:.0f}): {dark_pixels} pixels")
+
+            # Check edge density
+            edges = cv2.Canny(blurred, 50, 150)
+            edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+            print(f"  Edge density: {edge_density:.4f}")
+
+            # 4. Show debug images
+            self.show_debug_images(image, gray, bright_mask, dark_mask, edges, image_path)
+
+            # 5. Suggestions
+            print(f"\nSuggestions:")
+            if prediction == 1 and bright_pixels == 0 and dark_pixels == 0:
+                print("  - The defect might be very subtle or microscopic")
+                print("  - Consider lowering min_defect_area threshold")
+                print("  - The defect might be in texture/color rather than brightness")
+                print("  - Check for component misalignment or surface finish issues")
+
+        except Exception as e:
+            print(f"Error in debug analysis: {str(e)}")
+
+def show_debug_images(self, original, gray, bright_mask, dark_mask, edges, image_path):
+    """Show debug images side by side"""
+    try:
+        # Create a combined debug image
+        h, w = gray.shape
+        debug_image = np.zeros((h * 2, w * 2, 3), dtype=np.uint8)
+        
+        # Top-left: Original
+        debug_image[0:h, 0:w] = cv2.resize(original, (w, h))
+        
+        # Top-right: Grayscale
+        debug_image[0:h, w:2*w] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        
+        # Bottom-left: Bright mask
+        debug_image[h:2*h, 0:w] = cv2.cvtColor(bright_mask, cv2.COLOR_GRAY2BGR)
+        
+        # Bottom-right: Dark mask
+        debug_image[h:2*h, w:2*w] = cv2.cvtColor(dark_mask, cv2.COLOR_GRAY2BGR)
+        
+        # Add labels
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(debug_image, "Original", (10, 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(debug_image, "Grayscale", (w + 10, 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(debug_image, "Bright Mask", (10, h + 30), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(debug_image, "Dark Mask", (w + 10, h + 30), font, 0.7, (255, 255, 255), 2)
+        
+        # Show the debug image
+        window_name = f"Debug Analysis - {os.path.basename(image_path)}"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.imshow(window_name, debug_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        
+    except Exception as e:
+        print(f"Error showing debug images: {str(e)}")
+
+# Modified defect detection with relaxed mode
+def detect_with_relaxed_thresholds(self, image):
+    """Try defect detection with more relaxed thresholds"""
+    try:
+        # Temporarily reduce thresholds
+        original_min_area = self.defect_detector.min_defect_area
+        original_bright_threshold = self.defect_detector.bright_threshold
+        original_dark_threshold = self.defect_detector.dark_threshold
+        
+        # Use more relaxed thresholds
+        self.defect_detector.min_defect_area = 100  # Much smaller
+        
+        # Convert to grayscale and get adaptive thresholds
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mean_intensity = np.mean(gray)
+        std_intensity = np.std(gray)
+        
+        self.defect_detector.bright_threshold = mean_intensity + 1.5 * std_intensity
+        self.defect_detector.dark_threshold = mean_intensity - 1.5 * std_intensity
+        
+        print(f"Using relaxed thresholds:")
+        print(f"  Min area: {self.defect_detector.min_defect_area}")
+        print(f"  Bright threshold: {self.defect_detector.bright_threshold:.0f}")
+        print(f"  Dark threshold: {self.defect_detector.dark_threshold:.0f}")
+        
+        # Detect defects with relaxed thresholds
+        result_image = self.defect_detector.detect_and_highlight_defects(image)
+        
+        # Restore original thresholds
+        self.defect_detector.min_defect_area = original_min_area
+        self.defect_detector.bright_threshold = original_bright_threshold
+        self.defect_detector.dark_threshold = original_dark_threshold
+        
+        return result_image
+        
+    except Exception as e:
+        print(f"Error in relaxed detection: {str(e)}")
+        return image
 
 
 class PCBDefectDetector:
@@ -1153,8 +1315,9 @@ if __name__ == "__main__":
         elif choice == '5':
             print("Goodbye!")
             break
+
         
         else:
-            print("Invalid choice. Please try again.")
+            print("Image file not found.")
 
 print("Script completed...")
