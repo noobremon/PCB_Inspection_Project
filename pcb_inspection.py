@@ -662,40 +662,200 @@ class PCBDefectDetector:
         return defects
     
     def _detect_surface_defects(self, gray):
-        """Detect surface defects using texture analysis"""
-        defects = []
-        try:
-            # Apply local standard deviation filter
-            kernel = np.ones((9, 9), np.float32) / 81
-            mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
-            sqr_mean = cv2.filter2D((gray.astype(np.float32))**2, -1, kernel)
-            std_dev = np.sqrt(sqr_mean - mean**2)
+    
+    defects = []
+    try:
+        # Method 1: Original texture-based detection
+        texture_defects = self._detect_texture_defects(gray)
+        defects.extend(texture_defects)
+        
+        # Method 2: Enhanced scratch detection using line detection
+        scratch_defects = self._detect_scratch_defects(gray)
+        defects.extend(scratch_defects)
+        
+        # Method 3: Directional gradient analysis for linear defects
+        gradient_defects = self._detect_gradient_defects(gray)
+        defects.extend(gradient_defects)
+        
+    except Exception as e:
+        print(f"Error detecting surface defects: {str(e)}")
+        
+    return defects
+
+def _detect_texture_defects(self, gray):
+    """Original texture-based defect detection"""
+    defects = []
+    try:
+        # Apply local standard deviation filter
+        kernel = np.ones((9, 9), np.float32) / 81
+        mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
+        sqr_mean = cv2.filter2D((gray.astype(np.float32))**2, -1, kernel)
+        std_dev = np.sqrt(sqr_mean - mean**2)
+        
+        # Threshold for high texture variation
+        _, texture_mask = cv2.threshold(std_dev.astype(np.uint8), 40, 255, cv2.THRESH_BINARY)
+        
+        # Apply morphological operations
+        kernel = np.ones((5, 5), np.uint8)
+        texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_CLOSE, kernel)
+        texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(texture_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.min_defect_area <= area <= self.max_defect_area:
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Check if the texture variation is consistent (not noise)
+                roi = std_dev[y:y+h, x:x+w]
+                if np.mean(roi) > 35:  # Consistent high variation
+                    defects.append((x, y, w, h, 'surface'))
+                    
+    except Exception as e:
+        print(f"Error detecting texture defects: {str(e)}")
+        
+    return defects
+
+def _detect_scratch_defects(self, gray):
+    """Enhanced scratch detection using line detection and morphological operations"""
+    defects = []
+    try:
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # Calculate gradients in both directions
+        grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        gradient_magnitude = np.uint8(gradient_magnitude * 255 / np.max(gradient_magnitude))
+        
+        # Threshold gradient magnitude to find strong edges
+        _, edge_mask = cv2.threshold(gradient_magnitude, 30, 255, cv2.THRESH_BINARY)
+        
+        # Use morphological operations to detect linear features
+        # Horizontal line detection
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+        horizontal_lines = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, horizontal_kernel)
+        
+        # Vertical line detection
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+        vertical_lines = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, vertical_kernel)
+        
+        # Diagonal line detection (45 degrees)
+        diagonal_kernel1 = np.array([[1, 0, 0, 0, 0],
+                                    [0, 1, 0, 0, 0],
+                                    [0, 0, 1, 0, 0],
+                                    [0, 0, 0, 1, 0],
+                                    [0, 0, 0, 0, 1]], dtype=np.uint8)
+        diagonal_lines1 = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, diagonal_kernel1)
+        
+        # Diagonal line detection (-45 degrees)
+        diagonal_kernel2 = np.array([[0, 0, 0, 0, 1],
+                                    [0, 0, 0, 1, 0],
+                                    [0, 0, 1, 0, 0],
+                                    [0, 1, 0, 0, 0],
+                                    [1, 0, 0, 0, 0]], dtype=np.uint8)
+        diagonal_lines2 = cv2.morphologyEx(edge_mask, cv2.MORPH_OPEN, diagonal_kernel2)
+        
+        # Combine all line detections
+        lines_combined = cv2.bitwise_or(horizontal_lines, vertical_lines)
+        lines_combined = cv2.bitwise_or(lines_combined, diagonal_lines1)
+        lines_combined = cv2.bitwise_or(lines_combined, diagonal_lines2)
+        
+        # Apply additional morphological operations to clean up
+        kernel = np.ones((3, 3), np.uint8)
+        lines_combined = cv2.morphologyEx(lines_combined, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(lines_combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area >= 50:  # Lower threshold for linear features
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Check aspect ratio for linear features
+                aspect_ratio = max(w, h) / min(w, h)
+                
+                # Accept features with high aspect ratio (linear scratches)
+                if aspect_ratio >= 3.0:  # Linear feature
+                    # Additional validation: check if it's a real scratch
+                    roi = gray[y:y+h, x:x+w]
+                    
+                    # Check for intensity variation along the scratch
+                    if w > h:  # Horizontal scratch
+                        profile = np.mean(roi, axis=0)
+                    else:  # Vertical scratch
+                        profile = np.mean(roi, axis=1)
+                    
+                    # Check if there's a consistent intensity drop/rise
+                    if np.std(profile) > 10:  # Significant variation
+                        defects.append((x, y, w, h, 'scratch'))
+                        
+    except Exception as e:
+        print(f"Error detecting scratch defects: {str(e)}")
+        
+    return defects
+
+def _detect_gradient_defects(self, gray):
+    """Detect defects using directional gradient analysis"""
+    defects = []
+    try:
+        # Apply stronger edge detection for subtle scratches
+        edges = cv2.Canny(gray, 20, 60)  # Lower thresholds for subtle edges
+        
+        # Apply dilation to connect broken edges
+        kernel = np.ones((2, 2), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        
+        # Use HoughLinesP to detect line segments
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=30, minLineLength=20, maxLineGap=5)
+        
+        if lines is not None:
+            # Create mask for detected lines
+            line_mask = np.zeros_like(gray)
             
-            # Threshold for high texture variation
-            _, texture_mask = cv2.threshold(std_dev.astype(np.uint8), 40, 255, cv2.THRESH_BINARY)
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(line_mask, (x1, y1), (x2, y2), 255, 2)
             
-            # Apply morphological operations
+            # Apply morphological closing to connect nearby lines
             kernel = np.ones((5, 5), np.uint8)
-            texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_CLOSE, kernel)
-            texture_mask = cv2.morphologyEx(texture_mask, cv2.MORPH_OPEN, kernel)
+            line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, kernel)
             
             # Find contours
-            contours, _ = cv2.findContours(texture_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if self.min_defect_area <= area <= self.max_defect_area:
+                if area >= 30:  # Small threshold for line segments
                     x, y, w, h = cv2.boundingRect(contour)
                     
-                    # Check if the texture variation is consistent (not noise)
-                    roi = std_dev[y:y+h, x:x+w]
-                    if np.mean(roi) > 35:  # Consistent high variation
-                        defects.append((x, y, w, h, 'surface'))
+                    # Check if it's a linear defect
+                    aspect_ratio = max(w, h) / min(w, h)
+                    if aspect_ratio >= 2.5:  # Linear feature
+                        # Validate by checking surrounding area
+                        pad = 5
+                        y_start = max(0, y - pad)
+                        y_end = min(gray.shape[0], y + h + pad)
+                        x_start = max(0, x - pad)
+                        x_end = min(gray.shape[1], x + w + pad)
                         
-        except Exception as e:
-            print(f"Error detecting surface defects: {str(e)}")
-            
-        return defects
+                        roi_extended = gray[y_start:y_end, x_start:x_end]
+                        roi_defect = gray[y:y+h, x:x+w]
+                        
+                        # Check if defect area has different intensity than surroundings
+                        if abs(np.mean(roi_extended) - np.mean(roi_defect)) > 15:
+                            defects.append((x, y, w, h, 'scratch'))
+                            
+    except Exception as e:
+        print(f"Error detecting gradient defects: {str(e)}")
+        
+    return defects
     
     def _filter_and_merge_defects(self, defects):
         """Filter and merge overlapping defects"""
